@@ -1,0 +1,118 @@
+/*
+  TELECOMANDA - Transmitator ESP-NOW
+  -------------------------------------
+  Scop: citeste cele 2 joystick-uri (4 axe: Throttle, Yaw, Pitch, Roll)
+  si switch-ul de Arm/Disarm, le impacheteaza intr-un pachet de date,
+  si le trimite prin ESP-NOW catre ESP32-ul de pe drona.
+
+  Cablaj (conform mapare finala din proiect):
+  - Throttle (joystick stanga, axa Y) -> GPIO 35
+  - Yaw      (joystick stanga, axa X) -> GPIO 34
+  - Pitch    (joystick dreapta, axa Y) -> GPIO 33
+  - Roll     (joystick dreapta, axa X) -> GPIO 32
+  - Arm switch -> GPIO 25 (INPUT_PULLUP, LOW = armat, HIGH = dezarmat)
+
+  Adresa MAC a dronei (receptor): F4:2D:C9:6A:7D:00
+  -> daca vreodata schimbi/resetezi ESP32-ul de pe drona in asa fel
+     incat capata alta adresa MAC (rar, dar posibil dupa reflash-uri
+     de firmware), trebuie sa actualizezi DRONE_MAC de mai jos.
+
+  Ce vezi in Serial Monitor: valorile brute citite si trimise, la
+  fiecare pachet - util pentru depanare, le vom opri/reduce mai tarziu.
+*/
+
+#include <esp_now.h>
+#include <WiFi.h>
+
+// pini joystick-uri
+// NOTA: pinii Throttle/Yaw au fost interschimbati fata de maparea initiala
+// din documentatie, dupa testul fizic - firele joystick-ului stanga sunt
+// conectate opus fata de ce era planificat (axa Y iese pe GPIO34, axa X pe
+// GPIO35). Am corectat aici in cod, ca sa nu mai umbli la fire.
+const int PIN_THROTTLE = 34;
+const int PIN_YAW      = 35;
+// Pitch/Roll interschimbate si ele fata de mapare, dupa acelasi tip de
+// test fizic ca la Throttle/Yaw - corectat aici in cod.
+const int PIN_PITCH    = 32;
+const int PIN_ROLL     = 33;
+const int PIN_ARM_SWITCH = 25;
+
+// adresa MAC a ESP32-ului de pe drona (receptor)
+uint8_t droneMac[] = {0xF4, 0x2D, 0xC9, 0x6A, 0x7D, 0x00};
+
+// structura pachetului trimis - TREBUIE sa fie identica (aceleasi campuri,
+// aceeasi ordine, aceleasi tipuri) si in codul de pe drona
+typedef struct struct_message {
+  int throttle;
+  int yaw;
+  int pitch;
+  int roll;
+  bool armed;
+} struct_message;
+
+struct_message dataToSend;
+
+esp_now_peer_info_t peerInfo;
+
+void onDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
+  if (status != ESP_NOW_SEND_SUCCESS) {
+    Serial.println("Trimitere ESP-NOW esuata!");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  analogReadResolution(12); // explicit 12-bit, 0-4095
+
+  pinMode(PIN_ARM_SWITCH, INPUT_PULLUP);
+
+  WiFi.mode(WIFI_STA);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("EROARE: esp_now_init() a esuat.");
+    return;
+  }
+
+  esp_now_register_send_cb(onDataSent);
+
+  memcpy(peerInfo.peer_addr, droneMac, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("EROARE: nu am putut adauga drona ca peer ESP-NOW.");
+    return;
+  }
+
+  Serial.println("=== TELECOMANDA - ESP-NOW TX pornit ===");
+  Serial.println("Trimit pachete catre drona...");
+}
+
+unsigned long lastPrint = 0;
+
+void loop() {
+  dataToSend.throttle = analogRead(PIN_THROTTLE);
+  dataToSend.yaw      = analogRead(PIN_YAW);
+  dataToSend.pitch    = analogRead(PIN_PITCH);
+  dataToSend.roll     = analogRead(PIN_ROLL);
+  dataToSend.armed    = (digitalRead(PIN_ARM_SWITCH) == LOW);
+
+  esp_err_t result = esp_now_send(droneMac, (uint8_t *) &dataToSend, sizeof(dataToSend));
+
+  if (millis() - lastPrint > 200) { // 5x/secunda, suficient pentru debug
+    lastPrint = millis();
+    Serial.print("Throttle: "); Serial.print(dataToSend.throttle);
+    Serial.print("  Yaw: "); Serial.print(dataToSend.yaw);
+    Serial.print("  Pitch: "); Serial.print(dataToSend.pitch);
+    Serial.print("  Roll: "); Serial.print(dataToSend.roll);
+    Serial.print("  Armed: "); Serial.println(dataToSend.armed ? "DA" : "nu");
+
+    if (result != ESP_OK) {
+      Serial.println("  -> eroare la esp_now_send()");
+    }
+  }
+
+  delay(50); // ~20 pachete/secunda
+}
